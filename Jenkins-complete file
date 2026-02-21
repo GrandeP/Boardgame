@@ -1,0 +1,104 @@
+pipeline {
+    agent any
+    tools{
+        jdk 'jdk17'
+        maven 'maven3'
+    }
+    environment{
+        SCANNER_HOME = 'sonar-scanner'
+    }
+
+    stages {
+        stage('Git CheckOut') {
+            steps {
+                git branch: 'main', credentialsId: 'git-cred', url: 'https://github.com/GrandeP/Boardgame.git'
+            }
+        }
+        
+        stage('Compile') {
+            steps {
+                sh "mvn compile"
+            }
+        }
+        
+        stage('test') {
+            steps {
+                sh "mvn test"
+            }
+        }
+        
+        stage('file system scanner') {
+            steps {
+                sh "trivy fs . --format table -o trivy-fs-report.html"
+            }
+        }
+        
+        stage('Sonarqube analysis') {
+            steps {
+                withSonarQubeEnv('MySonarServer') {
+                    withCredentials([string(credentialsId: 'sonar-token', variable: 'SONAR_TOKEN')]) {
+                        sh "mvn sonar:sonar -Dsonar.login=$SONAR_TOKEN"
+                    }
+                }
+            }
+        }
+		stage('quality gate'){
+		    steps{
+		        script{
+		            waitForQualityGate abortPipeline: false, credentialId: 'sonar-token'
+		        }
+		    }
+		}
+		stage('build'){
+		    steps{
+		        sh 'mvn package'
+		    }
+		}
+		stage('publish to nexus'){
+		    steps{
+		        withMaven(globalMavenSettingsConfig: 'global-settings', jdk: 'jdk17', maven: 'maven3', traceability: true) {
+                        sh "mvn deploy"
+                 }
+		    }
+		}
+		stage('build and tag docker image'){
+		    steps{
+		        script{
+		            withDockerRegistry(credentialsId: 'docker-cred', toolName: 'docker') {
+                        sh "docker build -t prasanthgrande/boardgame:latest ."
+                    }
+		        }
+		    }
+		}
+		stage('docker image scan'){
+		    steps{
+		        sh "trivy image --format table -o trivy-fs-report.html prasanthgrande/boardgame:latest"
+		    }
+		}
+		stage('push docker image'){
+		    steps{
+		        script{
+		            withDockerRegistry(credentialsId: 'docker-cred', toolName: 'docker') {
+                        sh "docker push prasanthgrande/boardgame:latest"
+                    }
+		        }
+		    }
+		}
+		stage('deploy to kubernetes'){
+		    steps{
+		        withKubeConfig(caCertificate: '', clusterName: 'kubernetes', contextName: '', credentialsId: 'k8-cred', namespace: 'webapps', restrictKubeConfigAccess: false, serverUrl: 'https://172.31.45.11:6443') {
+                        sh "kubectl apply -f deployment-service.yaml"
+                }
+		    }
+		}
+			stage('verify the deployment'){
+		    steps{
+		        withKubeConfig(caCertificate: '', clusterName: 'kubernetes', contextName: '', credentialsId: 'k8-cred', namespace: 'webapps', restrictKubeConfigAccess: false, serverUrl: 'https://172.31.45.11:6443') {
+                        sh "kubectl get pods -n webapps"
+                        sh "kubectl get svc -n webapps"
+                }
+		    }
+		}
+		
+    }
+}
